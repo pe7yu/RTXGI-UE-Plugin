@@ -9,6 +9,7 @@
 */
 
 #include "../Public/DDGIUtilities.h"
+#include "DynamicRHI.h"
 
 //Implementation from FLatentGPUTimer from ScenePrivate.h / RendererScene.cpp
 FLatentGPUTimerDDGI::FLatentGPUTimerDDGI(FRenderQueryPoolRHIRef InTimerQueryPool)
@@ -26,42 +27,80 @@ void FLatentGPUTimerDDGI::SetPool(FRenderQueryPoolRHIRef InTimerQueryPool)
 	TimerQueryPool = InTimerQueryPool;
 }
 
+//bool FLatentGPUTimerDDGI::Tick(FRHICommandListImmediate& RHICmdList)
+//{
+//	if (GSupportsTimestampRenderQueries == false)
+//	{
+//		return false;
+//	}
+//
+//	QueryIndex = (QueryIndex + 1) % NumBufferedFrames;
+//
+//	if (StartQueries[QueryIndex].GetQuery() && EndQueries[QueryIndex].GetQuery())
+//	{
+//		if (IsRunningRHIInSeparateThread())
+//		{
+//			// Block until the RHI thread has processed the previous query commands, if necessary
+//			// Stat disabled since we buffer 2 frames minimum, it won't actually block
+//			//SCOPE_CYCLE_COUNTER(STAT_TranslucencyTimestampQueryFence_Wait);
+//			int32 BlockFrame = NumBufferedFrames - 1;
+//			FRHICommandListExecutor::WaitOnRHIThreadFence(QuerySubmittedFences[BlockFrame]);
+//			QuerySubmittedFences[BlockFrame] = nullptr;
+//		}
+//
+//		uint64 StartMicroseconds;
+//		uint64 EndMicroseconds;
+//		bool bStartSuccess;
+//		bool bEndSuccess;
+//
+//		{
+//			// Block on the GPU until we have the timestamp query results, if necessary
+//			// Stat disabled since we buffer 2 frames minimum, it won't actually block
+//			//SCOPE_CYCLE_COUNTER(STAT_TranslucencyTimestampQuery_Wait);
+//			bStartSuccess = RHICmdList.GetRenderQueryResult(StartQueries[QueryIndex].GetQuery(), StartMicroseconds, true);
+//			bEndSuccess = RHICmdList.GetRenderQueryResult(EndQueries[QueryIndex].GetQuery(), EndMicroseconds, true);
+//		}
+//
+//		TotalTime -= TimeSamples[SampleIndex];
+//		float LastFrameTranslucencyDurationMS = TimeSamples[SampleIndex];
+//		if (bStartSuccess && bEndSuccess)
+//		{
+//			LastFrameTranslucencyDurationMS = (EndMicroseconds - StartMicroseconds) / 1000.0f;
+//		}
+//
+//		TimeSamples[SampleIndex] = LastFrameTranslucencyDurationMS;
+//		TotalTime += LastFrameTranslucencyDurationMS;
+//		SampleIndex = (SampleIndex + 1) % AvgSamples;
+//
+//		return bStartSuccess && bEndSuccess;
+//	}
+//
+//	return false;
+//}
+
 bool FLatentGPUTimerDDGI::Tick(FRHICommandListImmediate& RHICmdList)
 {
-	if (GSupportsTimestampRenderQueries == false)
+	if (!GSupportsTimestampRenderQueries)
 	{
 		return false;
 	}
 
 	QueryIndex = (QueryIndex + 1) % NumBufferedFrames;
 
-	if (StartQueries[QueryIndex].GetQuery() && EndQueries[QueryIndex].GetQuery())
+	if (StartQueries[QueryIndex].IsValid() && EndQueries[QueryIndex].IsValid())
 	{
-		if (IsRunningRHIInSeparateThread())
-		{
-			// Block until the RHI thread has processed the previous query commands, if necessary
-			// Stat disabled since we buffer 2 frames minimum, it won't actually block
-			//SCOPE_CYCLE_COUNTER(STAT_TranslucencyTimestampQueryFence_Wait);
-			int32 BlockFrame = NumBufferedFrames - 1;
-			FRHICommandListExecutor::WaitOnRHIThreadFence(QuerySubmittedFences[BlockFrame]);
-			QuerySubmittedFences[BlockFrame] = nullptr;
-		}
+		uint64 StartMicroseconds = 0;
+		uint64 EndMicroseconds = 0;
+		bool bStartSuccess = false;
+		bool bEndSuccess = false;
 
-		uint64 StartMicroseconds;
-		uint64 EndMicroseconds;
-		bool bStartSuccess;
-		bool bEndSuccess;
-
-		{
-			// Block on the GPU until we have the timestamp query results, if necessary
-			// Stat disabled since we buffer 2 frames minimum, it won't actually block
-			//SCOPE_CYCLE_COUNTER(STAT_TranslucencyTimestampQuery_Wait);
-			bStartSuccess = RHIGetRenderQueryResult(StartQueries[QueryIndex].GetQuery(), StartMicroseconds, true);
-			bEndSuccess = RHIGetRenderQueryResult(EndQueries[QueryIndex].GetQuery(), EndMicroseconds, true);
-		}
+		// GetRenderQueryResult is now deprecated, and query polling is done automatically. Gonna figure out how to work with this later.
+		bStartSuccess = RHIGetRenderQueryResult(StartQueries[QueryIndex].GetQuery(), StartMicroseconds, true);
+		bEndSuccess = RHIGetRenderQueryResult(EndQueries[QueryIndex].GetQuery(), EndMicroseconds, true);
 
 		TotalTime -= TimeSamples[SampleIndex];
 		float LastFrameTranslucencyDurationMS = TimeSamples[SampleIndex];
+
 		if (bStartSuccess && bEndSuccess)
 		{
 			LastFrameTranslucencyDurationMS = (EndMicroseconds - StartMicroseconds) / 1000.0f;

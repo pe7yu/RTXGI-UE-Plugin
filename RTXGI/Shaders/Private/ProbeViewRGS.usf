@@ -48,6 +48,8 @@ then "vis DDGIProbesTexture" to see the texture
 #include "/Engine/Private/RayTracing/RayTracingDirectionalLight.ush"
 #include "/Engine/Private/RayTracing/RayTracingRectLight.ush"
 #include "/Engine/Private/RayTracing/RayTracingSphereLight.ush"
+//#include "/Engine/Private/RayTracing/RayTracingSpotLight.ush"
+//#include "/Engine/Private/RayTracing/RayTracingPointLight.ush"
 #include "/Engine/Private/RayTracing/RayTracingLightingCommon.ush"
 #include "/Engine/Private/ReflectionEnvironmentShared.ush"
 #include "/Engine/Private/Montecarlo.ush"
@@ -115,22 +117,47 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeViewRGS)
     RandomSequence_Initialize(RandSequence, linear_rand, FrameRandomSeed);
     uint2 PixelCoord = DispatchRaysIndex().xy;
 
+    bool bHasScattered = false;
+
+    float MaxTraceDistance = 100000.0f;
+    const bool bIsCameraRay = !bHasScattered;
+
     FMaterialClosestHitPayload Payload = TraceRayAndAccumulateResults(
-        Ray,
-        TLAS,
-        RayFlags,
-        InstanceInclusionMask,
-        RandSequence,
-        PixelCoord,
-        MaxNormalBias,
-        ReflectedShadowsType,
-        bShouldDoDirectLighting,
-        bShouldDoEmissiveAndIndirectLighting,
-        bRayTraceSkyLightContribution,
-        bDecoupleSampleGeneration,
-        RayCone,
-        bEnableSkyLightContribution,
-        PathVertexRadiance);
+        Ray, // FRayDesc
+        TLAS, // RaytracingAccelerationStructure
+        RayFlags, // uint
+        InstanceInclusionMask, // uint
+        RandSequence, // RandomSequence
+        PixelCoord, // uint2
+        MaxNormalBias, // float (shadow max normal bias)
+        MaxTraceDistance, // float (new input)
+        ReflectedShadowsType, // uint
+        bShouldDoDirectLighting, // uint
+        bShouldDoEmissiveAndIndirectLighting, // uint
+        bRayTraceSkyLightContribution, // bool
+        bDecoupleSampleGeneration, // bool
+        bIsCameraRay, // bool (new input) todo
+        RayCone, // FRayCone
+        bEnableSkyLightContribution, // bool
+        PathVertexRadiance // inout float3
+    );
+
+    //FMaterialClosestHitPayload Payload = TraceRayAndAccumulateResults(
+    //    Ray,
+    //    TLAS,
+    //    RayFlags,
+    //    InstanceInclusionMask,
+    //    RandSequence,
+    //    PixelCoord,
+    //    MaxNormalBias,
+    //    ReflectedShadowsType,
+    //    bShouldDoDirectLighting,
+    //    bShouldDoEmissiveAndIndirectLighting,
+    //    bRayTraceSkyLightContribution,
+    //    bDecoupleSampleGeneration,
+    //    RayCone,
+    //    bEnableSkyLightContribution,
+    //    PathVertexRadiance);
 
     float4 result = float4(PathVertexRadiance.xyz, Payload.HitT);
 

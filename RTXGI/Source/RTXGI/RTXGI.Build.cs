@@ -50,11 +50,17 @@ public class RTXGI : ModuleRules
 		{
 			EngineDirectory + "/Source/Runtime/Renderer/Private",
 			EngineDirectory + "/Source/Runtime/RenderCore/Public",
-		});
+            EngineDirectory + "/Source/Runtime/RHI/Public",
+        });
 
 		PublicIncludePaths.AddRange(new string[]
 		{
 			"../Shaders/Shared"
 		});
-	}
+
+        if (bPlatformSupportsRTXGI)
+        {
+            PublicDefinitions.Add("RHI_RAYTRACING=1");
+        }
+    }
 }

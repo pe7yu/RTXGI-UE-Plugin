@@ -74,7 +74,7 @@ struct FDDGITexturePixels
 		uint32 PixelFormat = 0;
 	} Desc;
 	TArray<uint8> Pixels;
-	FTexture2DRHIRef Texture;
+	FTextureRHIRef Texture;
 };
 
 struct FDDGITextureLoadContext

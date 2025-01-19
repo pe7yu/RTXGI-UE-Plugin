@@ -20,7 +20,6 @@
 #include "SystemTextures.h"
 
 // UE private interfaces
-#include "DataDrivenShaderPlatformInfo.h"
 #include "PostProcess/SceneRenderTargets.h"
 #include "SceneRendering.h"
 #include "DeferredShadingRenderer.h"
@@ -132,7 +131,53 @@ public:
 	/**
 	* Initialize the RHI for this rendering resource
 	*/
-	void InitRHI(FRHICommandListBase& RHICmdList) override
+//	void InitRHI() override
+//	{
+//		const int32 NumSides = NumSphereSides;
+//		const int32 NumRings = NumSphereRings;
+//		const int32 NumVerts = (NumSides + 1) * (NumRings + 1);
+//
+//		const float RadiansPerRingSegment = PI / (float)NumRings;
+//		float Radius = 1;
+//
+//		TArray<VectorType, TInlineAllocator<NumRings + 1> > ArcVerts;
+//		ArcVerts.Empty(NumRings + 1);
+//		// Calculate verts for one arc
+//		for (int32 i = 0; i < NumRings + 1; i++)
+//		{
+//			const float Angle = i * RadiansPerRingSegment;
+//			ArcVerts.Add(FVector3f(0.0f, FMath::Sin(Angle), FMath::Cos(Angle)));
+//		}
+//
+//		TResourceArray<VectorType, VERTEXBUFFER_ALIGNMENT> Verts;
+//		Verts.Empty(NumVerts);
+//		// Then rotate this arc NumSides + 1 times.
+//		const FVector3f Center = FVector3f(0, 0, 0);
+//		for (int32 s = 0; s < NumSides + 1; s++)
+//		{
+//			FRotator3f ArcRotator(0, 360.f * ((float)s / NumSides), 0);
+//			FRotationMatrix44f ArcRot(ArcRotator);
+//
+//			for (int32 v = 0; v < NumRings + 1; v++)
+//			{
+//				const int32 VIx = (NumRings + 1) * s + v;
+//				Verts.Add(Center + Radius * ArcRot.TransformPosition(ArcVerts[v]));
+//			}
+//		}
+//
+//		NumSphereVerts = Verts.Num();
+//		uint32 Size = Verts.GetResourceDataSize();
+//
+//		// Create vertex buffer. Fill buffer with initial data upon creation
+//#if ENGINE_MAJOR_VERSION < 5
+//		FRHIResourceCreateInfo CreateInfo(&Verts);
+//#else
+//		FRHIResourceCreateInfo CreateInfo(TEXT("TDDGIProbeSphereVertexBuffer"), &Verts);
+//#endif
+//		VertexBufferRHI = RHICreateVertexBuffer(Size, BUF_Static, CreateInfo);
+//	}
+
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		const int32 NumSides = NumSphereSides;
 		const int32 NumRings = NumSphereRings;
@@ -141,8 +186,9 @@ public:
 		const float RadiansPerRingSegment = PI / (float)NumRings;
 		float Radius = 1;
 
-		TArray<VectorType, TInlineAllocator<NumRings + 1> > ArcVerts;
+		TArray<VectorType, TInlineAllocator<NumRings + 1>> ArcVerts;
 		ArcVerts.Empty(NumRings + 1);
+
 		// Calculate verts for one arc
 		for (int32 i = 0; i < NumRings + 1; i++)
 		{
@@ -152,7 +198,8 @@ public:
 
 		TResourceArray<VectorType, VERTEXBUFFER_ALIGNMENT> Verts;
 		Verts.Empty(NumVerts);
-		// Then rotate this arc NumSides + 1 times.
+
+		// Rotate this arc NumSides + 1 times
 		const FVector3f Center = FVector3f(0, 0, 0);
 		for (int32 s = 0; s < NumSides + 1; s++)
 		{
@@ -169,13 +216,14 @@ public:
 		NumSphereVerts = Verts.Num();
 		uint32 Size = Verts.GetResourceDataSize();
 
-		// Create vertex buffer. Fill buffer with initial data upon creation
+		// Create vertex buffer using RHICmdList
 #if ENGINE_MAJOR_VERSION < 5
 		FRHIResourceCreateInfo CreateInfo(&Verts);
+		VertexBufferRHI = RHICreateVertexBuffer(Size, BUF_Static, CreateInfo);
 #else
 		FRHIResourceCreateInfo CreateInfo(TEXT("TDDGIProbeSphereVertexBuffer"), &Verts);
-#endif
 		VertexBufferRHI = RHICmdList.CreateVertexBuffer(Size, BUF_Static, CreateInfo);
+#endif
 	}
 
 	int32 GetVertexCount() const { return NumSphereVerts; }
@@ -194,7 +242,44 @@ public:
 	/**
 	* Initialize the RHI for this rendering resource
 	*/
-	void InitRHI(FRHICommandListBase& RHICmdList) override
+//	void InitRHI() override
+//	{
+//		const int32 NumSides = NumSphereSides;
+//		const int32 NumRings = NumSphereRings;
+//		TResourceArray<uint16, INDEXBUFFER_ALIGNMENT> Indices;
+//
+//		// Add triangles for all the vertices generated
+//		for (int32 s = 0; s < NumSides; s++)
+//		{
+//			const int32 a0start = (s + 0) * (NumRings + 1);
+//			const int32 a1start = (s + 1) * (NumRings + 1);
+//
+//			for (int32 r = 0; r < NumRings; r++)
+//			{
+//				Indices.Add(a0start + r + 0);
+//				Indices.Add(a1start + r + 0);
+//				Indices.Add(a0start + r + 1);
+//				Indices.Add(a1start + r + 0);
+//				Indices.Add(a1start + r + 1);
+//				Indices.Add(a0start + r + 1);
+//			}
+//		}
+//
+//		NumIndices = Indices.Num();
+//		const uint32 Size = Indices.GetResourceDataSize();
+//		const uint32 Stride = sizeof(uint16);
+//
+//		// Create index buffer. Fill buffer with initial data upon creation
+//#if ENGINE_MAJOR_VERSION < 5
+//		FRHIResourceCreateInfo CreateInfo(&Indices);
+//#else
+//		FRHIResourceCreateInfo CreateInfo(TEXT("TDDGIProbeSphereIndexBuffer"), &Indices);
+//#endif
+//		uint32 InUsage = BUF_Static | BUF_IndexBuffer;
+//		IndexBufferRHI = RHICreateIndexBuffer(Stride, Size, InUsage, CreateInfo);
+//	}
+
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		const int32 NumSides = NumSphereSides;
 		const int32 NumRings = NumSphereRings;
@@ -221,13 +306,14 @@ public:
 		const uint32 Size = Indices.GetResourceDataSize();
 		const uint32 Stride = sizeof(uint16);
 
-		// Create index buffer. Fill buffer with initial data upon creation
+		// Create index buffer using RHICmdList
 #if ENGINE_MAJOR_VERSION < 5
 		FRHIResourceCreateInfo CreateInfo(&Indices);
+		IndexBufferRHI = RHICreateIndexBuffer(Stride, Size, BUF_Static | BUF_IndexBuffer, CreateInfo);
 #else
 		FRHIResourceCreateInfo CreateInfo(TEXT("TDDGIProbeSphereIndexBuffer"), &Indices);
+		IndexBufferRHI = RHICmdList.CreateIndexBuffer(Stride, Size, BUF_Static | BUF_IndexBuffer, CreateInfo);
 #endif
-		IndexBufferRHI = RHICmdList.CreateIndexBuffer(Stride, Size, BUF_Static, CreateInfo);
 	}
 
 	int32 GetIndexCount() const { return NumIndices; };
@@ -251,11 +337,20 @@ public:
 
 	virtual ~FVisualizeDDGIProbesVertexDeclaration() {}
 
+	/*virtual void InitRHI() override
+	{
+		FVertexDeclarationElementList Elements;
+		uint16 Stride = sizeof(FVisualDDGIProbesVertex);
+		Elements.Add(FVertexElement(0, STRUCT_OFFSET(FVisualDDGIProbesVertex, Position), VET_Float4, 0, Stride));
+		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
+	}*/
+
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		FVertexDeclarationElementList Elements;
 		uint16 Stride = sizeof(FVisualDDGIProbesVertex);
 		Elements.Add(FVertexElement(0, STRUCT_OFFSET(FVisualDDGIProbesVertex, Position), VET_Float4, 0, Stride));
+
 		VertexDeclarationRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
 	}
 
@@ -445,10 +540,10 @@ static bool MemoryUseExec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 #if ENGINE_MAJOR_VERSION < 5
 					FRHITexture2D* texture = proxy->ProbesIrradiance->GetShaderResourceRHI()->GetTexture2D();
 #else
-					FRHITexture2D* texture = proxy->ProbesIrradiance->GetRHI()->GetTexture2D();
+					FRHITexture2D* texture = proxy->ProbesIrradiance->GetRHI();
 #endif
-					if (texture)
-						info.irradianceBytes = texture->GetSizeX()* texture->GetSizeY()* GPixelFormats[texture->GetFormat()].BlockBytes;
+					if (texture && texture->GetTextureBaseRHI())
+						info.irradianceBytes = texture->GetDesc().Extent.X * texture->GetDesc().Extent.Y * GPixelFormats[texture->GetDesc().Format].BlockBytes;
 				}
 
 				if (proxy->ProbesDistance)
@@ -456,10 +551,10 @@ static bool MemoryUseExec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 #if ENGINE_MAJOR_VERSION < 5
 					FRHITexture2D* texture = proxy->ProbesDistance->GetShaderResourceRHI()->GetTexture2D();
 #else
-					FRHITexture2D* texture = proxy->ProbesDistance->GetRHI()->GetTexture2D();
+					FRHITexture2D* texture = proxy->ProbesDistance->GetRHI();	//GetTexture2D();
 #endif
-					if (texture)
-						info.distanceBytes = texture->GetSizeX() * texture->GetSizeY() * GPixelFormats[texture->GetFormat()].BlockBytes;
+					if (texture && texture->GetTextureBaseRHI())
+						info.distanceBytes = texture->GetDesc().Extent.X * texture->GetDesc().Extent.Y * GPixelFormats[texture->GetDesc().Format].BlockBytes;	//texture->GetSizeX() * texture->GetSizeY() * GPixelFormats[texture->GetFormat()].BlockBytes;
 				}
 
 				if (proxy->ProbesOffsets)
@@ -467,10 +562,10 @@ static bool MemoryUseExec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 #if ENGINE_MAJOR_VERSION < 5
 					FRHITexture2D* texture = proxy->ProbesOffsets->GetShaderResourceRHI()->GetTexture2D();
 #else
-					FRHITexture2D* texture = proxy->ProbesOffsets->GetRHI()->GetTexture2D();
+					FRHITexture2D* texture = proxy->ProbesOffsets->GetRHI();
 #endif
-					if (texture)
-						info.offsetsBytes = texture->GetSizeX() * texture->GetSizeY() * GPixelFormats[texture->GetFormat()].BlockBytes;
+					if (texture && texture->GetTextureBaseRHI())
+						info.offsetsBytes = texture->GetDesc().Extent.X * texture->GetDesc().Extent.Y * GPixelFormats[texture->GetDesc().Format].BlockBytes; //texture->GetSizeX() * texture->GetSizeY() * GPixelFormats[texture->GetFormat()].BlockBytes;
 				}
 
 				if (proxy->ProbesStates)
@@ -478,10 +573,10 @@ static bool MemoryUseExec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 #if ENGINE_MAJOR_VERSION < 5
 					FRHITexture2D* texture = proxy->ProbesStates->GetShaderResourceRHI()->GetTexture2D();
 #else
-					FRHITexture2D* texture = proxy->ProbesStates->GetRHI()->GetTexture2D();
+					FRHITexture2D* texture = proxy->ProbesStates->GetRHI();
 #endif
-					if (texture)
-						info.statesBytes = texture->GetSizeX() * texture->GetSizeY() * GPixelFormats[texture->GetFormat()].BlockBytes;
+					if (texture && texture->GetTextureBaseRHI())
+						info.statesBytes = texture->GetDesc().Extent.X * texture->GetDesc().Extent.Y * GPixelFormats[texture->GetDesc().Format].BlockBytes; //texture->GetSizeX() * texture->GetSizeY() * GPixelFormats[texture->GetFormat()].BlockBytes;
 				}
 
 				memoryInfo.Push(info);

@@ -37,6 +37,8 @@
 #include "/Engine/Private/RayTracing/RayTracingDirectionalLight.ush"
 #include "/Engine/Private/RayTracing/RayTracingRectLight.ush"
 #include "/Engine/Private/RayTracing/RayTracingSphereLight.ush"
+//#include "/Engine/Private/RayTracing/RayTracingSpotLight.ush"
+//#include "/Engine/Private/RayTracing/RayTracingPointLight.ush"
 #include "/Engine/Private/RayTracing/RayTracingLightingCommon.ush"
 #include "/Engine/Private/ReflectionEnvironmentShared.ush"
 #include "/Engine/Private/Montecarlo.ush"
@@ -119,11 +121,11 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeUpdateRGS)
     int probeIndex = DispatchIndex.y;                  // index of current probe
 
 #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
-    int storageProbeIndex = DDGIGetProbeIndexOffset(probeIndex, DDGIVolume.probeGridCounts, DDGIVolume.probeScrollOffsets);
+    int storageProbeIndex = DDGIGetProbeIndexOffset(probeIndex, DDGIVolume_probeGridCounts, DDGIVolume_probeScrollOffsets);
 #else
     int storageProbeIndex = probeIndex;
 #endif
-    int2 texelPosition = DDGIGetProbeTexelPosition(storageProbeIndex, DDGIVolume.probeGridCounts);
+    int2 texelPosition = DDGIGetProbeTexelPosition(storageProbeIndex, DDGIVolume_probeGridCounts);
 
 #if RTXGI_DDGI_PARTIAL_UPDATE_ISV
     uint3 prevProbeSpace;
@@ -142,7 +144,7 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeUpdateRGS)
     // Handle round robin updating.
     // If this probe is outside of the window for updating, bail out.
     {
-        int numProbes = DDGIVolume.probeGridCounts.x * DDGIVolume.probeGridCounts.y * DDGIVolume.probeGridCounts.z;
+        int numProbes = DDGIVolume_probeGridCounts.x * DDGIVolume_probeGridCounts.y * DDGIVolume_probeGridCounts.z;
         int probeRRIndex = (probeIndex < DDGIVolume_ProbeIndexStart) ? probeIndex + numProbes : probeIndex;
         if (probeRRIndex >= DDGIVolume_ProbeIndexStart + DDGIVolume_ProbeIndexCount)
             return;
@@ -160,22 +162,22 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeUpdateRGS)
 
 #if RTXGI_DDGI_PROBE_RELOCATION
     #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
-    float3 probeWorldPosition = DDGIGetProbeWorldPositionWithOffset(probeIndex, DDGIVolume.origin, DDGIVolume.rotation, DDGIVolume.probeGridCounts, DDGIVolume.probeGridSpacing, DDGIVolume.probeScrollOffsets, DDGIVolume_ProbeOffsets);
+    float3 probeWorldPosition = DDGIGetProbeWorldPositionWithOffset(probeIndex, DDGIVolume_origin, DDGIVolume_rotation, DDGIVolume_probeGridCounts, DDGIVolume_probeGridSpacing, DDGIVolume_probeScrollOffsets, DDGIVolume_ProbeOffsets);
     #else
-    float3 probeWorldPosition = DDGIGetProbeWorldPositionWithOffset(probeIndex, DDGIVolume.origin, DDGIVolume.rotation, DDGIVolume.probeGridCounts, DDGIVolume.probeGridSpacing, DDGIVolume_ProbeOffsets);
+    float3 probeWorldPosition = DDGIGetProbeWorldPositionWithOffset(probeIndex, DDGIVolume_origin, DDGIVolume_rotation, DDGIVolume_probeGridCounts, DDGIVolume_probeGridSpacing, DDGIVolume_ProbeOffsets);
     #endif
 #else
-    float3 probeWorldPosition = DDGIGetProbeWorldPosition(probeIndex, DDGIVolume.origin, DDGIVolume.rotation, DDGIVolume.probeGridCounts, DDGIVolume.probeGridSpacing);
+    float3 probeWorldPosition = DDGIGetProbeWorldPosition(probeIndex, DDGIVolume_origin, DDGIVolume_rotation, DDGIVolume_probeGridCounts, DDGIVolume_probeGridSpacing);
 #endif
 
-    float3 probeRayDirection = DDGIGetProbeRayDirection(rayIndex, DDGIVolume.numRaysPerProbe, DDGIVolume.probeRayRotationTransform);
+    float3 probeRayDirection = DDGIGetProbeRayDirection(rayIndex, DDGIVolume_numRaysPerProbe, DDGIVolume_probeRayRotationTransform);
 
     // Setup the probe ray
     FRayDesc Ray;
     Ray.Origin = probeWorldPosition;
     Ray.Direction = probeRayDirection;
     Ray.TMin = 0.f;
-    Ray.TMax = DDGIVolume.probeMaxRayDistance;
+    Ray.TMax = DDGIVolume_probeMaxRayDistance;
 
     const int ReflectedShadowsType = 1; // = hard shadows.  make configurable?
     const uint RayFlags = 0;
@@ -198,22 +200,31 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeUpdateRGS)
     RandomSequence_Initialize(RandSequence, linear_rand, FrameRandomSeed);
     uint2 PixelCoord = DispatchRaysIndex().xy; // Hmmmm.... does TraceRayAndAccumulateResults() assume screen-space trace or is this just for stochastics?  hopefully the latter but fixme:checkme
 
+    bool bHasScattered = false;
+
+    float MaxTraceDistance = 100000.0f;
+    const bool bIsCameraRay = !bHasScattered;
+
+
     FMaterialClosestHitPayload Payload = TraceRayAndAccumulateResults(
-        Ray,
-        TLAS,
-        RayFlags,
-        InstanceInclusionMask,
-        RandSequence,
-        PixelCoord,
-        MaxNormalBias,
-        ReflectedShadowsType,
-        bShouldDoDirectLighting,
-        bShouldDoEmissiveAndIndirectLighting,
-        bRayTraceSkyLightContribution,
-        bDecoupleSampleGeneration,
-        RayCone,
-        bEnableSkyLightContribution,
-        PathVertexRadiance);
+        Ray, // FRayDesc
+        TLAS, // RaytracingAccelerationStructure
+        RayFlags, // uint
+        InstanceInclusionMask, // uint
+        RandSequence, // RandomSequence
+        PixelCoord, // uint2
+        MaxNormalBias, // float (shadow max normal bias)
+        MaxTraceDistance, // float (new input)
+        ReflectedShadowsType, // uint
+        bShouldDoDirectLighting, // uint
+        bShouldDoEmissiveAndIndirectLighting, // uint
+        bRayTraceSkyLightContribution, // bool
+        bDecoupleSampleGeneration, // bool
+        bIsCameraRay, // bool (new) todo 
+        RayCone, // FRayCone
+        bEnableSkyLightContribution, // bool
+        PathVertexRadiance // inout float3
+    );
 
     // Adjust emissive contribution if we should
     PathVertexRadiance += Payload.Radiance * (DDGIVolume_EmissiveMultiplier - 1.0f);
@@ -266,19 +277,19 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeUpdateRGS)
         }
 
         DDGIVolumeDescGPU DDGIVolume_0;
-        DDGIVolume_0.origin = DDGIVolume.origin;
-        DDGIVolume_0.rotation = DDGIVolume.rotation;
-        DDGIVolume_0.probeMaxRayDistance = DDGIVolume.probeMaxRayDistance;
-        DDGIVolume_0.probeGridCounts = DDGIVolume.probeGridCounts;
-        DDGIVolume_0.probeRayRotationTransform = DDGIVolume.probeRayRotationTransform;
-        DDGIVolume_0.numRaysPerProbe = DDGIVolume.numRaysPerProbe;
-        DDGIVolume_0.probeGridSpacing = DDGIVolume.probeGridSpacing;
-        DDGIVolume_0.probeNumIrradianceTexels = DDGIVolume.probeNumIrradianceTexels;
-        DDGIVolume_0.probeNumDistanceTexels = DDGIVolume.probeNumDistanceTexels;
-        DDGIVolume_0.probeIrradianceEncodingGamma = DDGIVolume.probeIrradianceEncodingGamma;
-        DDGIVolume_0.normalBias = DDGIVolume.normalBias;
-        DDGIVolume_0.viewBias = DDGIVolume.viewBias;
-        DDGIVolume_0.probeScrollOffsets = DDGIVolume.probeScrollOffsets;
+        DDGIVolume_0.origin = DDGIVolume_origin;
+        DDGIVolume_0.rotation = DDGIVolume_rotation;
+        DDGIVolume_0.probeMaxRayDistance = DDGIVolume_probeMaxRayDistance;
+        DDGIVolume_0.probeGridCounts = DDGIVolume_probeGridCounts;
+        DDGIVolume_0.probeRayRotationTransform = DDGIVolume_probeRayRotationTransform;
+        DDGIVolume_0.numRaysPerProbe = DDGIVolume_numRaysPerProbe;
+        DDGIVolume_0.probeGridSpacing = DDGIVolume_probeGridSpacing;
+        DDGIVolume_0.probeNumIrradianceTexels = DDGIVolume_probeNumIrradianceTexels;
+        DDGIVolume_0.probeNumDistanceTexels = DDGIVolume_probeNumDistanceTexels;
+        DDGIVolume_0.probeIrradianceEncodingGamma = DDGIVolume_probeIrradianceEncodingGamma;
+        DDGIVolume_0.normalBias = DDGIVolume_normalBias;
+        DDGIVolume_0.viewBias = DDGIVolume_viewBias;
+        DDGIVolume_0.probeScrollOffsets = DDGIVolume_probeScrollOffsets;
 
         // Get irradiance from the DDGIVolume
         float3 surfacePosWS = Ray.Origin + Ray.Direction * Payload.HitT;
@@ -299,7 +310,7 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeUpdateRGS)
         probeLighting /= DDGIVolume_IrradianceScalar;
 
         // don't apply volume lighting outside the volume
-        float3 relPos = abs(surfacePosWS - DDGIVolume.origin);
+        float3 relPos = abs(surfacePosWS - DDGIVolume_origin);
         if ((relPos.x > DDGIVolume_Radius.x || relPos.y > DDGIVolume_Radius.y || relPos.z > DDGIVolume_Radius.z))
             probeLighting = float3(0.0f, 0.0f, 0.0f);
     }

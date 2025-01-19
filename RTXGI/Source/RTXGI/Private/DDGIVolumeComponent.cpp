@@ -17,7 +17,6 @@
 
 // UE Public Interfaces
 #include "ConvexVolume.h"
-#include "DataDrivenShaderPlatformInfo.h"
 #include "RenderGraphBuilder.h"
 #include "ShaderParameterStruct.h"
 #include "ShaderParameterUtils.h"
@@ -767,7 +766,7 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 	SET_FLOAT_STAT(SAMPLES_PER_MILLI, samplesPerMilli);
 
 	//GPU Timing code from UnrealEdMisc.cpp
-	uint32 GPUCycles = GraphBuilder.RHICmdList.GetGPUFrameCycles();
+	uint32 GPUCycles = RHIGetGPUFrameCycles();
 	double RawGPUFrameTime = FPlatformTime::ToMilliseconds(GPUCycles);
 
 	float totalGpuTime = RawGPUFrameTime;
@@ -843,11 +842,30 @@ static FDDGITexturePixels GetTexturePixelsStep1_RenderThread(FRHICommandListImme
 	ret.Desc.PixelFormat = (int32)textureGPU->GetFormat();
 
 	// Create the texture
-	FRHITextureCreateDesc CreateInfo = FRHITextureCreateDesc::Create2D(TEXT("DDGIGetTexturePixelsSave"), ret.Desc.Width,ret.Desc.Height, textureGPU->GetFormat());
-	CreateInfo.AddFlags(TexCreate_ShaderResource);
+//	FRHIResourceCreateInfo createInfo(TEXT("DDGIGetTexturePixelsSave"));
+//	ret.Texture = RHICreateTexture(
+//		textureGPU->GetTexture2D()->GetSizeX(),
+//		textureGPU->GetTexture2D()->GetSizeY(),
+//		textureGPU->GetFormat(),
+//		1,
+//		1,
+//#if ENGINE_MAJOR_VERSION < 5
+//		TexCreate_ShaderResource | TexCreate_Transient,
+//#else
+//		TexCreate_ShaderResource,
+//#endif
+//		ERHIAccess::CopyDest,
+//		createInfo);
 
-	CreateInfo.InitialState = ERHIAccess::CopyDest;
-	ret.Texture = RHICreateTexture(CreateInfo);
+	FRHITextureCreateDesc CreateDesc =
+		FRHITextureCreateDesc::Create2D(TEXT("DDGIGetTexturePixelsSave"))
+		.SetExtent(FIntPoint(textureGPU->GetTexture2D()->GetSizeX(), textureGPU->GetTexture2D()->GetSizeY()))
+		.SetFormat(textureGPU->GetFormat())
+		.SetNumMips(1)
+		.SetFlags(ETextureCreateFlags::ShaderResource)
+		.SetInitialState(ERHIAccess::CopyDest);
+
+	ret.Texture = RHICreateTexture(CreateDesc);
 
 	// Transition the GPU texture to a copy source
 	RHICmdList.Transition(FRHITransitionInfo(textureGPU, ERHIAccess::SRVMask, ERHIAccess::CopySrc));
@@ -868,13 +886,13 @@ static void GetTexturePixelsStep2_RenderThread(FRHICommandListImmediate& RHICmdL
 	if (!texturePixels.Texture) return;
 
 	// Get a pointer to the CPU memory
-	uint8* mappedTextureMemory = (uint8*)RHICmdList.LockTexture2D(texturePixels.Texture, 0, RLM_ReadOnly, texturePixels.Desc.Stride, false);
+	uint8* mappedTextureMemory = (uint8*)RHILockTexture2D(texturePixels.Texture, 0, RLM_ReadOnly, texturePixels.Desc.Stride, false);
 
 	// Copy the texture data to CPU memory
 	texturePixels.Pixels.AddZeroed(texturePixels.Desc.Height * texturePixels.Desc.Stride);
 	FMemory::Memcpy(&texturePixels.Pixels[0], mappedTextureMemory, texturePixels.Desc.Height * texturePixels.Desc.Stride);
 
-	RHICmdList.UnlockTexture2D(texturePixels.Texture, 0, false);
+	RHIUnlockTexture2D(texturePixels.Texture, 0, false);
 }
 
 static void SaveFDDGITexturePixels(FArchive& Ar, FDDGITexturePixels& texturePixels, bool bSaveFormat)
@@ -910,19 +928,38 @@ static void LoadFDDGITexturePixels(FArchive& Ar, FDDGITexturePixels& texturePixe
 	// Early out if no data was loaded
 	if (texturePixels.Desc.Width == 0 || texturePixels.Desc.Height == 0 || texturePixels.Desc.Stride == 0) return;
 
+	// Create the texture resource
+//	FRHIResourceCreateInfo createInfo(TEXT("DDGITextureLoad"));
+//	texturePixels.Texture = RHICreateTexture2D(
+//		texturePixels.Desc.Width,
+//		texturePixels.Desc.Height,
+//		expectedPixelFormat,
+//		1,
+//		1,
+//#if ENGINE_MAJOR_VERSION < 5
+//		TexCreate_ShaderResource | TexCreate_Transient,
+//#else
+//		TexCreate_ShaderResource,
+//#endif
+//		createInfo);
+	FRHITextureCreateDesc CreateDesc =
+		FRHITextureCreateDesc::Create2D(TEXT("DDGITextureLoad"))
+		.SetExtent(FIntPoint(texturePixels.Desc.Width, texturePixels.Desc.Height))
+		.SetFormat(expectedPixelFormat)
+		.SetNumMips(1)
+		.SetFlags(ETextureCreateFlags::ShaderResource) // Заменяет TexCreate_ShaderResource
+		.SetInitialState(ERHIAccess::Unknown);
+
+	texturePixels.Texture = RHICreateTexture(CreateDesc);
+
 	// Copy the texture's data to the staging buffer
 	ENQUEUE_RENDER_COMMAND(DDGILoadTex)(
-		[&texturePixels, expectedPixelFormat](FRHICommandListImmediate& RHICmdList)
+		[&texturePixels](FRHICommandListImmediate& RHICmdList)
 		{
-			// Create the texture resource
-			FRHITextureCreateDesc CreateInfo = FRHITextureCreateDesc::Create2D(TEXT("DDGITextureLoad"), texturePixels.Desc.Width, texturePixels.Desc.Height, expectedPixelFormat);
-			CreateInfo.AddFlags(TexCreate_ShaderResource);
-			texturePixels.Texture = RHICreateTexture(CreateInfo);
-
 			if (texturePixels.Pixels.Num() == texturePixels.Desc.Height * texturePixels.Desc.Stride)
 			{
 				uint32 destStride;
-				uint8* mappedTextureMemory = (uint8*)RHICmdList.LockTexture2D(texturePixels.Texture, 0, RLM_WriteOnly, destStride, false);
+				uint8* mappedTextureMemory = (uint8*)RHILockTexture2D(texturePixels.Texture, 0, RLM_WriteOnly, destStride, false);
 				if (texturePixels.Desc.Stride == destStride)
 				{
 					// Loaded data has the same stride as expected by the runtime
@@ -943,7 +980,7 @@ static void LoadFDDGITexturePixels(FArchive& Ar, FDDGITexturePixels& texturePixe
 						SourceBuffer += texturePixels.Desc.Stride;
 					}
 				}
-				RHICmdList.UnlockTexture2D(texturePixels.Texture, 0, false);
+				RHIUnlockTexture2D(texturePixels.Texture, 0, false);
 			}
 
 			// Only clear the texels when in a game.
@@ -991,12 +1028,9 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 			{
 				FDDGITexturePixels Irradiance, Distance, Offsets, States;
 
-				auto CVarDDGIStaticInEditor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.StaticInEditor"));
-
 				// When we are *not* cooking and ray tracing is available, copy the DDGIVolume probe texture resources
 				// to CPU memory otherwise, write out the DDGIVolume texture resources acquired at load time
-				// Also disable copying when we are static in editor
-				if (!Ar.IsCooking() && IsRayTracingEnabled() && proxy && (!CVarDDGIStaticInEditor || !CVarDDGIStaticInEditor->GetBool()))
+				if (!Ar.IsCooking() && IsRayTracingEnabled() && proxy)
 				{
 					// Copy textures to CPU accessible texture resources
 					ENQUEUE_RENDER_COMMAND(DDGISaveTexStep1)(
@@ -1357,30 +1391,16 @@ void UDDGIVolumeComponent::DestroyRenderState_Concurrent()
 	{
 		FDDGITextureLoadContext& ComponentLoadContext = LoadContext;
 
-		bool bStatic = RuntimeStatic;
-#if WITH_EDITOR
-		if (bStatic)
-		{
-			auto CVarDDGIStaticInEditor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.StaticInEditor"));
-			bStatic = CVarDDGIStaticInEditor && CVarDDGIStaticInEditor->GetBool();
-		}
-#endif
-
 		FDDGIVolumeSceneProxy* DDGIProxy = SceneProxy;
 		ENQUEUE_RENDER_COMMAND(DeleteProxy)(
-			[DDGIProxy, &ComponentLoadContext, bStatic](FRHICommandListImmediate& RHICmdList)
+			[DDGIProxy, &ComponentLoadContext](FRHICommandListImmediate& RHICmdList)
 			{
 				// If the component has textures pending load, nothing to do here. Those are the most authoritative.
 				if (!ComponentLoadContext.ReadyForLoad)
 				{
-					// If static, just reset the ready for load state
-					if (bStatic)
-					{
-						ComponentLoadContext.ReadyForLoad = true;
-					}
 					// If the proxy has textures pending load which haven't been serviced yet, the component should take those
 					// in case it creates another proxy.
-					else if (DDGIProxy->TextureLoadContext.ReadyForLoad)
+					if (DDGIProxy->TextureLoadContext.ReadyForLoad)
 					{
 						ComponentLoadContext = DDGIProxy->TextureLoadContext;
 					}

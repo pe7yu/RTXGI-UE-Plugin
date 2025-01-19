@@ -15,11 +15,13 @@
 #include "Engine/TextureRenderTarget2D.h"
 #include "SceneView.h"
 #include "RenderGraph.h"
-#include "RenderGraphResources.h"
+#include "FXRenderingUtils.h"
+#include "SceneRendering.h"
 
 #if WITH_RTXGI
 #include "RayGenShaderUtils.h"
 #endif
+
 #include "ShaderParameterStruct.h"
 #include "GlobalShader.h"
 #include "RTXGIPluginSettings.h"
@@ -27,11 +29,26 @@
 // UE private interfaces
 #include "ReflectionEnvironment.h"
 #include "FogRendering.h"
-#include "SceneRendering.h"
 #include "SceneTextureParameters.h"
 #include "RayTracing/RayTracingLighting.h"
+#include "RayTracing/RayTracingScene.h"
 #include "DeferredShadingRenderer.h"
 #include "ScenePrivate.h"
+#include "RayTracingDefinitions.h"
+#include "RayTracingInstance.h"
+#include "RendererPrivate.h"
+
+#include "ClearQuad.h"
+#include "PostProcess/SceneRenderTargets.h"
+#include "RHIResources.h"
+#include "PostProcess/PostProcessing.h"
+#include "RayTracing/RaytracingOptions.h"
+#include "RayTracing/RayTracing.h"
+
+#include "RayTracing/RayTracingOptions.h"
+#include "RayTracing/RayTracing.h"
+#include "RayTracing/RayTracingMaterialHitShaders.h"
+#include "RayTracingDefinitions.h"
 
 #include <cmath>
 
@@ -39,6 +56,7 @@
 #include "DDGIVolumeComponent.h"
 #include "DDGIVolumeDescGPU.h"
 #include "LegacyEngineCompat.h"
+#include <RayTracing/RayTracingMaterialHitShaders.h>
 
 #define LOCTEXT_NAMESPACE "FRTXGIPlugin"
 
@@ -55,20 +73,6 @@ static TAutoConsoleVariable<float> CVarDDGIIrradianceScalar(
 	TEXT("Multiplier to compensate for irradiance clipping that might happen in 10-bit mode (use smaller values for higher irradiance) for one of the \'r.RTXGI.DDGI.ProbesTextureVis\' debug modes. The value is clamped to [0.001, 1.0].\n"),
 	ECVF_RenderThreadSafe);
 #endif
-
-#if WITH_EDITOR
-static TAutoConsoleVariable<bool> CVarDDGIStaticInEditor(
-	TEXT("r.RTXGI.DDGI.StaticInEditor"),
-	true,
-	TEXT("If true, will not update DDGI volumes in editor views\n"),
-	ECVF_RenderThreadSafe);
-#endif
-
-static TAutoConsoleVariable<bool> CVarDDGIForceRealtime(
-	TEXT("r.RTXGI.DDGI.ForceRealtime"),
-	false,
-	TEXT("If true, will force DDGI volumes as realtime.\n"),
-	ECVF_RenderThreadSafe);
 
 #if RHI_RAYTRACING
 
@@ -151,6 +155,17 @@ class FRayTracingRTXGIProbeUpdateRGS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FRayTracingRTXGIProbeUpdateRGS)
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FRayTracingRTXGIProbeUpdateRGS, FGlobalShader)
 
+	static ERayTracingPayloadType GetRayTracingPayloadType(const int32 PermutationId) 
+	{
+		return ERayTracingPayloadType::RayTracingMaterial;
+	}
+
+	static const FShaderBindingLayout* GetShaderBindingLayout(const FShaderPermutationParameters& Parameters)
+	{
+		return RayTracing::GetShaderBindingLayout(Parameters.Platform);
+	}
+
+
 	class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY"); // If false, it will cull back face triangles. We want this on for probe relocation and to stop light leak.
 	class FEnableMaterialsDim : SHADER_PERMUTATION_BOOL("ENABLE_MATERIALS");                 // If false, forces the geo to opaque (no alpha test). We want this off for speed.
 	class FEnableRelocation : SHADER_PERMUTATION_BOOL("RTXGI_DDGI_PROBE_RELOCATION");
@@ -170,7 +185,7 @@ class FRayTracingRTXGIProbeUpdateRGS : public FGlobalShader
 
 		// Set to 1 to be able to visualize this in the editor by typing "vis DDGIVolumeUpdateDebug" and later "vis none" to make it go away.
 		// Set to 0 to disable and deadstrip everything related
-		OutEnvironment.SetDefine(TEXT("DDGIVolumeUpdateDebug"), WITH_EDITOR);
+		OutEnvironment.SetDefine(TEXT("DDGIVolumeUpdateDebug"), 0);
 
 #if ENGINE_MAJOR_VERSION < 5
 		OutEnvironment.SetDefine(TEXT("UE4_COMPAT"), 1);
@@ -184,13 +199,10 @@ class FRayTracingRTXGIProbeUpdateRGS : public FGlobalShader
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
 	}
 
-	static ERayTracingPayloadType GetRayTracingPayloadType(const int32 PermutationId)
-	{
-		return ERayTracingPayloadType::RayTracingMaterial;
-	}
-
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		//SHADER_PARAMETER_SRV(RaytracingAccelerationStructure, TLAS)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(RaytracingAccelerationStructure, TLAS)
+
 
 		SHADER_PARAMETER(uint32, FrameRandomSeed)
 
@@ -215,8 +227,14 @@ class FRayTracingRTXGIProbeUpdateRGS : public FGlobalShader
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, DebugOutput)  // Per unreal RDG presentation, this is deadstripped if the shader doesn't write to it
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, DDGIProbeScrollSpace)
 
+		// assorted things needed by material resolves, even though some don't make sense outside of screenspace
+#if ENGINE_MAJOR_VERSION < 5
+		//SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSProfilesTexture)
+#else
+		//SHADER_PARAMETER_TEXTURE(Texture2D, SSProfilesTexture) // Accessed from ViewUniformBuffer
+#endif
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
-		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FRaytracingLightDataPacked, LightDataPacked)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FRayTracingLightGrid, LightGridPacked) // FRaytracingLightDataPacked
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -228,6 +246,16 @@ class FRayTracingRTXGIProbeViewRGS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FRayTracingRTXGIProbeViewRGS)
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FRayTracingRTXGIProbeViewRGS, FGlobalShader)
+
+	static ERayTracingPayloadType GetRayTracingPayloadType(const int32 PermutationId)
+	{
+		return ERayTracingPayloadType::RayTracingMaterial;
+	}
+
+	static const FShaderBindingLayout* GetShaderBindingLayout(const FShaderPermutationParameters& Parameters)
+	{
+		return RayTracing::GetShaderBindingLayout(Parameters.Platform);
+	}
 
 	class FEnableTwoSidedGeometryDim : SHADER_PERMUTATION_BOOL("ENABLE_TWO_SIDED_GEOMETRY"); // If false, it will cull back face triangles. We want this on for probe relocation and to stop light leak.
 	class FEnableMaterialsDim : SHADER_PERMUTATION_BOOL("ENABLE_MATERIALS");                 // If false, forces the geo to opaque (no alpha test). We want this off for speed.
@@ -253,13 +281,10 @@ class FRayTracingRTXGIProbeViewRGS : public FGlobalShader
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
 	}
 
-	static ERayTracingPayloadType GetRayTracingPayloadType(const int32 PermutationId)
-	{
-		return ERayTracingPayloadType::RayTracingMaterial;
-	}
-
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		//SHADER_PARAMETER_SRV(RaytracingAccelerationStructure, TLAS)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(RaytracingAccelerationStructure, TLAS)
+
 
 		SHADER_PARAMETER(uint32, FrameRandomSeed)
 
@@ -276,8 +301,14 @@ class FRayTracingRTXGIProbeViewRGS : public FGlobalShader
 
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RadianceOutput)
 
+		// assorted things needed by material resolves, even though some don't make sense outside of screenspace
+#if ENGINE_MAJOR_VERSION < 5
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SSProfilesTexture)
+#else
+		//SHADER_PARAMETER_TEXTURE(Texture2D, SSProfilesTexture)
+#endif
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
-		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FRaytracingLightDataPacked, LightDataPacked)
+		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FRayTracingLightGrid, LightGridPacked) // FRaytracingLightDataPacked
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -317,7 +348,7 @@ class FDDGIIrradianceBlend : public FGlobalShader
 
 		// Set to 1 to be able to visualize this in the editor by typing "vis DDGIIrradianceBlendDebug" and later "vis none" to make it go away.
 		// Set to 0 to disable and deadstrip everything related
-		OutEnvironment.SetDefine(TEXT("DDGIIrradianceBlendDebug"), WITH_EDITOR);
+		OutEnvironment.SetDefine(TEXT("DDGIIrradianceBlendDebug"), 0);
 
 		// needed for a typed UAV load. This already assumes we are raytracing, so should be fine.
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
@@ -376,7 +407,7 @@ class FDDGIDistanceBlend : public FGlobalShader
 
 		// Set to 1 to be able to visualize this in the editor by typing "vis DDGIDistanceBlendDebug" and later "vis none" to make it go away.
 		// Set to 0 to disable and deadstrip everything related
-		OutEnvironment.SetDefine(TEXT("DDGIDistanceBlendDebug"), WITH_EDITOR);
+		OutEnvironment.SetDefine(TEXT("DDGIDistanceBlendDebug"), 0);
 
 		// needed for a typed UAV load. This already assumes we are raytracing, so should be fine.
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
@@ -584,12 +615,7 @@ namespace DDGIVolumeUpdate
 		AnyRayTracingPassEnabledHandle = ARTPEDelegate.AddStatic(
 			[](bool& anyEnabled)
 			{
-				const bool bCanEverRun = CVarDDGIForceRealtime.GetValueOnRenderThread()
-#if WITH_EDITOR
-				|| !CVarDDGIStaticInEditor.GetValueOnRenderThread()
-#endif
-				;
-				anyEnabled |= bCanEverRun;
+				anyEnabled |= true;
 			}
 		);
 #endif // RHI_RAYTRACING
@@ -638,12 +664,7 @@ namespace DDGIVolumeUpdate
 			if (proxy->OwningScene != &Scene) continue;
 
 			// Don't update static runtime volumes during gameplay
-			const bool bIsValidForStatic = (View.bIsGameView && !CVarDDGIForceRealtime.GetValueOnRenderThread())
-#if WITH_EDITOR
-				|| CVarDDGIStaticInEditor.GetValueOnRenderThread()
-#endif
-				;
-			if (bIsValidForStatic && proxy->ComponentData.RuntimeStatic) continue;
+			if (View.bIsGameView && proxy->ComponentData.RuntimeStatic) continue;
 
 			// Don't update the volume if it is disabled
 			if (!proxy->ComponentData.EnableVolume) continue;
@@ -759,7 +780,7 @@ namespace DDGIVolumeUpdate
 #else
 	bool ShouldDynamicUpdate(const FScene& Scene)
 	{
-		return ShouldRenderRayTracingEffect(true) && Scene.RayTracingScene.GetRHIRayTracingScene() != nullptr;
+		return ShouldRenderRayTracingEffect(true) && Scene.RayTracingScene.GetRHIRayTracingScene(ERayTracingSceneLayer::Base) != nullptr;
 	}
 #endif
 
@@ -822,7 +843,7 @@ namespace DDGIVolumeUpdate
 #if ENGINE_MAJOR_VERSION < 5
 		if (DDGIProbesTextureVis == 0 || View.RayTracingScene.RayTracingSceneRHI == nullptr) return;
 #else
-		if (DDGIProbesTextureVis == 0 || Scene.RayTracingScene.GetRHIRayTracingScene() == nullptr) return;
+		if (DDGIProbesTextureVis == 0 || Scene.RayTracingScene.GetRHIRayTracingScene(ERayTracingSceneLayer::Base) == nullptr) return;
 #endif
 
 		static const int c_probeVisWidth = 800;
@@ -858,7 +879,21 @@ namespace DDGIVolumeUpdate
 		PassParameters->CameraPos = static_cast<FVector3f>(View.ViewMatrices.GetViewOrigin());
 		PassParameters->CameraMatrix = static_cast<FMatrix44f>(View.ViewMatrices.GetViewMatrix().Inverse());
 
-		PassParameters->TLAS = Scene.RayTracingScene.GetLayerView(ERayTracingSceneLayer::Base);
+#if ENGINE_MAJOR_VERSION < 5
+		PassParameters->TLAS = View.RayTracingScene.RayTracingSceneRHI->GetShaderResourceView();
+		check(PassParameters->TLAS);
+#else
+		FRHICommandListImmediate& RHICmdList = GRHICommandList.GetImmediateCommandList();
+		//FSceneInterface* SceneInterface = View.Family->Scene;
+
+		//FShaderResourceViewRHIRef RayTracingSceneView = UE::FXRenderingUtils::RayTracing::GetRayTracingSceneView(RHICmdList, SceneInterface);
+		//FRHIRayTracingScene* RayTracingScene = Scene.RayTracingScene.GetRHIRayTracingSceneChecked(ERayTracingSceneLayer::Base);
+		//FRHIShaderBindingTable* SBT = View.RayTracingSBT;
+		PassParameters->TLAS = View.GetRayTracingSceneLayerViewChecked(ERayTracingSceneLayer::Base);
+		//PassParameters->TLAS = SBT->GetOrCreateInlineBufferSRV(RHICmdList);
+		//PassParameters->TLAS = RayTracingSceneView;//SBT->GetOrCreateInlineBufferSRV(RHICmdList);
+		//PassParameters->TLAS = Scene.RayTracingScene.GetRHIRayTracingSceneChecked(ERayTracingSceneLayer::Base)->GetOrCreateMetadataBufferSRV(RHICmdList); //View.GetRayTracingSceneChecked(ERayTracingSceneLayer::Base)->RHI; //PassParameters->TLAS = Scene.RayTracingScene.GetShaderResourceViewChecked();
+#endif
 		PassParameters->RadianceOutput = ProbeVisUAV;
 		PassParameters->FrameRandomSeed = GFrameNumber;
 
@@ -876,10 +911,17 @@ namespace DDGIVolumeUpdate
 			PassParameters->Sky_TextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		}
 
+#if ENGINE_MAJOR_VERSION < 5
+		PassParameters->SSProfilesTexture = GraphBuilder.RegisterExternalTexture(View.RayTracingSubSurfaceProfileTexture);
+#else
+		//PassParameters->SSProfilesTexture = View.RayTracingSubSurfaceProfileTexture; // Accessed from ViewUniformBuffer
+#endif
 		PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
-		PassParameters->LightDataPacked = View.RayTracingLightDataUniformBuffer;
+		PassParameters->LightGridPacked = View.RayTracingLightGridUniformBuffer;
 
 		FIntPoint DispatchSize(c_probeVisWidth, c_probeVisHeight);
+		FRHIUniformBuffer* SceneUniformBuffer = View.GetSceneUniforms().GetBufferRHI(GraphBuilder);
+		ClearUnusedGraphResources(RayGenerationShader, PassParameters);
 
 		GraphBuilder.AddPass(
 			RDG_EVENT_NAME("DDGI RTRadiance %dx%d", DispatchSize.X, DispatchSize.Y),
@@ -888,13 +930,53 @@ namespace DDGIVolumeUpdate
 #if ENGINE_MAJOR_VERSION < 5
 			[PassParameters, RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI, &View, RayGenerationShader, DispatchSize](FRHICommandList& RHICmdList)
 #else
-			[PassParameters, RayTracingSceneRHI = Scene.RayTracingScene.GetRHIRayTracingSceneChecked(), &View, RayGenerationShader, DispatchSize](FRHIRayTracingCommandList& RHICmdList)
+			//[PassParameters, RayTracingSceneRHI = Scene.RayTracingScene.GetRHIRayTracingSceneChecked(ERayTracingSceneLayer::Base), &View, SceneUniformBuffer, RayGenerationShader, DispatchSize](FRHIRayTracingCommandList& RHICmdList)
+			[PassParameters, &View, SceneUniformBuffer, RayGenerationShader, DispatchSize](FRHIRayTracingCommandList& RHICmdList)
+
 #endif
 			{
-				FRayTracingShaderBindingsWriter GlobalResources;
-				SetShaderParameters(GlobalResources, RayGenerationShader, *PassParameters);
+				////FRayTracingShaderBindingsWriter GlobalResources;
+				//FRHIBatchedShaderParameters& GlobalResources = RHICmdList.GetScratchShaderParameters();
+				//SetShaderParameters(GlobalResources, RayGenerationShader, *PassParameters);
+				//TOptional<FScopedUniformBufferStaticBindings> StaticUniformBufferScope = RayTracing::BindStaticUniformBufferBindings(View, SceneUniformBuffer, RHICmdList);
 
-				RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenerationShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, DispatchSize.X, DispatchSize.Y);
+				//FRHIShaderBindingTable* SBT = View.RayTracingSBT;
+				////TOptional<FScopedUniformBufferStaticBindings> StaticUniformBufferScope = RayTracing::BindStaticUniformBufferBindings(View, SceneUniformBuffer, RHICmdList);
+				////RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenerationShader.GetRayTracingShader(), View.RayTracingScene.RayTracingSceneRHI, GlobalResources, DispatchSize.X, DispatchSize.Y);
+				//RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenerationShader.GetRayTracingShader(), View.RayTracingSBT, GlobalResources, DispatchSize.X, DispatchSize.Y);
+
+				FRHIBatchedShaderParameters& GlobalResources = RHICmdList.GetScratchShaderParameters();
+				SetShaderParameters(GlobalResources, RayGenerationShader, *PassParameters); // #1
+				TOptional<FScopedUniformBufferStaticBindings> StaticUniformBufferScope = RayTracing::BindStaticUniformBufferBindings(View, SceneUniformBuffer, RHICmdList);
+				
+				FRayTracingPipelineStateInitializer Initializer;
+
+				Initializer.MaxPayloadSizeInBytes = GetRayTracingPayloadTypeMaxSize(ERayTracingPayloadType::RayTracingMaterial);
+				EShaderPlatform ShaderPlatform = GetFeatureLevelShaderPlatform(View.GetFeatureLevel());
+				/*const FShaderBindingLayout* ShaderBindingLayout = RayTracing::GetShaderBindingLayout(ShaderPlatform);
+				if (ShaderBindingLayout)
+				{
+					Initializer.ShaderBindingLayout = &ShaderBindingLayout->RHILayout;
+				}*/
+
+				FRHIRayTracingShader* RayGenShaderTable[] = { RayGenerationShader.GetRayTracingShader() };
+				Initializer.SetRayGenShaderTable(RayGenShaderTable);
+
+				//FRHIRayTracingShader* HitGroupTable[] = { GetRayTracingDefaultOpaqueShader(View.ShaderMap) };
+				//Initializer.SetHitGroupTable(HitGroupTable);
+
+				//FRHIRayTracingShader* MissGroupTable[] = { GetRayTracingDefaultMissShader(View.ShaderMap) };
+				//Initializer.SetMissShaderTable(MissGroupTable);
+
+				//FRayTracingPipelineState* Pipeline = PipelineStateCache::GetAndOrCreateRayTracingPipelineState(RHICmdList, Initializer);
+				FRHIShaderBindingTable* SBT = View.RayTracingSBT;
+				FRayTracingPipelineState* Pipeline = View.RayTracingMaterialPipeline;
+				//FShaderBindingTableRHIRef SBT = Scene->RayTracingSBT.AllocateRHI(RHICmdList, ERayTracingShaderBindingMode::RTPSO, ERayTracingHitGroupIndexingMode::Disallow, RayTracingScene.NumMissShaderSlots, RayTracingScene.NumCallableShaderSlots, Initializer.GetMaxLocalBindingDataSize());
+
+				RHICmdList.SetDefaultRayTracingHitGroup(SBT, Pipeline, 0);
+				RHICmdList.SetRayTracingMissShader(SBT, 0, Pipeline, 0 /* ShaderIndexInPipeline */, 0, nullptr, 0);
+				RHICmdList.CommitShaderBindingTable(SBT);
+				RHICmdList.RayTraceDispatch(Pipeline, RayGenerationShader.GetRayTracingShader(), SBT, GlobalResources, DispatchSize.X, DispatchSize.Y);
 			}
 		);
 	}
@@ -941,7 +1023,22 @@ namespace DDGIVolumeUpdate
 		FRayTracingRTXGIProbeUpdateRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FRayTracingRTXGIProbeUpdateRGS::FParameters>();
 		*PassParameters = DefaultPassParameters;
 
-		PassParameters->TLAS = Scene.RayTracingScene.GetLayerView(ERayTracingSceneLayer::Base);
+#if ENGINE_MAJOR_VERSION < 5
+		PassParameters->TLAS = View.RayTracingScene.RayTracingSceneRHI->GetShaderResourceView();
+		check(PassParameters->TLAS);
+#else
+		FRHICommandListImmediate& RHICmdList = GRHICommandList.GetImmediateCommandList();
+		FSceneInterface* SceneInterface = View.Family->Scene;
+
+		FShaderResourceViewRHIRef RayTracingSceneView = UE::FXRenderingUtils::RayTracing::GetRayTracingSceneView(RHICmdList, SceneInterface);
+		FRHIRayTracingScene* RayTracingScene = Scene.RayTracingScene.GetRHIRayTracingSceneChecked(ERayTracingSceneLayer::Base);
+		FRHIShaderBindingTable* SBT = View.RayTracingSBT;
+
+		//PassParameters->TLAS = SBT->GetOrCreateInlineBufferSRV(RHICmdList);
+		//PassParameters->TLAS = RayTracingSceneView;//SBT->GetOrCreateInlineBufferSRV(RHICmdList);
+		//PassParameters->TLAS = Scene.RayTracingScene.GetRHIRayTracingSceneChecked(ERayTracingSceneLayer::Base)->GetOrCreateMetadataBufferSRV(RHICmdList); // Deprecated
+		PassParameters->TLAS = View.GetRayTracingSceneLayerViewChecked(ERayTracingSceneLayer::Base);
+#endif
 		PassParameters->RadianceOutput = ProbesRadianceUAV;
 		PassParameters->FrameRandomSeed = GFrameNumber;
 		
@@ -1013,28 +1110,56 @@ namespace DDGIVolumeUpdate
 		);
 		PassParameters->DebugOutput = GraphBuilder.CreateUAV(GraphBuilder.CreateTexture(DDGIDebugOutputDesc, TEXT("DDGIVolumeUpdateDebug")));
 
+#if ENGINE_MAJOR_VERSION < 5
+		PassParameters->SSProfilesTexture = GraphBuilder.RegisterExternalTexture(View.RayTracingSubSurfaceProfileTexture);
+#else
+		//PassParameters->SSProfilesTexture = View.RayTracingSubSurfaceProfileTexture; // Accessed from ViewUniformBuffer
+#endif
 		PassParameters->ViewUniformBuffer = View.ViewUniformBuffer;
-		PassParameters->LightDataPacked = View.RayTracingLightDataUniformBuffer;
+		PassParameters->LightGridPacked = View.RayTracingLightGridUniformBuffer;
+		ClearUnusedGraphResources(RayGenerationShader, PassParameters);
 
 		FIntPoint DispatchSize = ProbesRadianceTex->Desc.Extent;
+		FRHIUniformBuffer* SceneUniformBuffer = View.GetSceneUniforms().GetBufferRHI(GraphBuilder);
+		const FRayTracingScene& RTScene = Scene.RayTracingScene;
 
 		GraphBuilder.AddPass(
 			RDG_EVENT_NAME("DDGI RTRadiance %dx%d", DispatchSize.X, DispatchSize.Y),
 			PassParameters,
 			ERDGPassFlags::Compute,
-#if ENGINE_MAJOR_VERSION < 5
-			[PassParameters, RayTracingSceneRHI = View.RayTracingScene.RayTracingSceneRHI, &View, RayGenerationShader, DispatchSize, ProbesRadianceTex]
-			(FRHICommandList& RHICmdList)
-#else
-			[PassParameters, RayTracingSceneRHI = Scene.RayTracingScene.GetRHIRayTracingSceneChecked(), &View, RayGenerationShader, DispatchSize, ProbesRadianceTex]
-			(FRHIRayTracingCommandList& RHICmdList)
-#endif
-			{
-				FRayTracingShaderBindingsWriter GlobalResources;
-				SetShaderParameters(GlobalResources, RayGenerationShader, *PassParameters);
+			[PassParameters, &View, SceneUniformBuffer, RayGenerationShader, DispatchSize, ProbesRadianceTex] (FRHIRayTracingCommandList& RHICmdList)
 
-				RHICmdList.RayTraceDispatch(View.RayTracingMaterialPipeline, RayGenerationShader.GetRayTracingShader(), RayTracingSceneRHI, GlobalResources, DispatchSize.X, DispatchSize.Y);
+			{
+				
+				FRHIBatchedShaderParameters& GlobalResources = RHICmdList.GetScratchShaderParameters();
+				SetShaderParameters(GlobalResources, RayGenerationShader, *PassParameters); // #2
+				TOptional<FScopedUniformBufferStaticBindings> StaticUniformBufferScope = RayTracing::BindStaticUniformBufferBindings(View, SceneUniformBuffer, RHICmdList);
+
+				FRayTracingPipelineStateInitializer Initializer;
+
+				Initializer.MaxPayloadSizeInBytes = GetRayTracingPayloadTypeMaxSize(ERayTracingPayloadType::RayTracingMaterial);
+				EShaderPlatform ShaderPlatform = GetFeatureLevelShaderPlatform(View.GetFeatureLevel());
+
+
+				//const FShaderBindingLayout* ShaderBindingLayout = RayTracing::GetShaderBindingLayout(ShaderPlatform);
+				//if (ShaderBindingLayout)
+				//{
+				//	Initializer.ShaderBindingLayout = &ShaderBindingLayout->RHILayout;
+				//}
+
+
+				FRHIRayTracingShader* RayGenShaderTable[] = { RayGenerationShader.GetRayTracingShader() };
+				Initializer.SetRayGenShaderTable(RayGenShaderTable);
+
+				FRHIShaderBindingTable* SBT = View.RayTracingSBT;
+				FRayTracingPipelineState* Pipeline = View.RayTracingMaterialPipeline;
+
+				RHICmdList.SetDefaultRayTracingHitGroup(SBT, Pipeline, 0);
+				RHICmdList.SetRayTracingMissShader(SBT, 0, Pipeline, 0 /* ShaderIndexInPipeline */, 0, nullptr, 0);
+				RHICmdList.CommitShaderBindingTable(SBT);
+				RHICmdList.RayTraceDispatch(Pipeline, RayGenerationShader.GetRayTracingShader(), SBT, GlobalResources, DispatchSize.X, DispatchSize.Y);
 			}
+
 		);
 	}
 
